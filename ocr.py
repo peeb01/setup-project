@@ -71,25 +71,52 @@ import requests
 
 def ocr_batch(images: list[Image.Image]) -> list[str]:
     base_url = next(ollama_pool)
+
     api_url = f"{base_url.replace('/v1', '')}/api/generate"
-    
+
+    system_instruction = (
+        "Extract all text from the image and format as Markdown.\n"
+        "- Tables: Render in clean HTML <table>.\n"
+        "- Checkboxes: Use ☐ or ☑.\n"
+        "- Output: Return only the extracted content, no explanations."
+    )
+
     results = []
     for img in images:
+        max_dim = 1120
+        if max(img.size) > max_dim:
+            img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+        
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+
         buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
+        img.save(buf, format="JPEG", quality=90)
         encoded = base64.b64encode(buf.getvalue()).decode()
         
         payload = {
             "model": OLLAMA_MODEL,
-            "prompt": "<image>\nExtract all text from this image.", 
+            "prompt": f"<image>\n{system_instruction}\n\nContent:", 
             "images": [encoded],
-            "stream": False
+            "stream": False,
+            "options": {
+                "temperature": 0,
+                "num_predict": 4096,
+                "repeat_penalty": 1.2,
+                "stop": ["<|endoftext|>", "###", "Instructions:"]
+            }
         }
         
         try:
-            response = requests.post(api_url, json=payload, timeout=60)
+            response = requests.post(api_url, json=payload, timeout=180)
             response.raise_for_status()
-            results.append(response.json().get("response", ""))
+            res_json = response.json()
+            text = res_json.get("response", "").strip()
+
+            if "Extract all text" in text:
+                text = "" 
+                
+            results.append(text)
         except Exception as e:
             print(f" [API ERR] {e}")
             results.append("")

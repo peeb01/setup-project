@@ -1,4 +1,3 @@
-
 import os
 import json
 import zipfile
@@ -22,18 +21,17 @@ OLLAMA_URLS = ["http://localhost:11434/v1"]
 OLLAMA_MODEL = "scb10x/typhoon-ocr1.5-3b"
 
 MAX_PAGES_PER_DOC = 100
-BATCH_SIZE = 16
-BUFFER_MAX_PAGES = 256
+BATCH_SIZE = 1
+BUFFER_MAX_PAGES = 1000
+NUM_WORKERS = 20
 
 ollama_pool = cycle(OLLAMA_URLS)
 write_lock = Lock()
-
 
 def get_cache_path(year: str, filename: str) -> str:
     cache_dir = os.path.join(OCR_ROOT, SERVICE, "_cache", year)
     os.makedirs(cache_dir, exist_ok=True)
     return os.path.join(cache_dir, f"{filename}.json")
-
 
 def load_cache(year: str, filename: str):
     path = get_cache_path(year, filename)
@@ -42,12 +40,10 @@ def load_cache(year: str, filename: str):
             return json.load(f)
     return None
 
-
 def save_cache(year: str, filename: str, data: dict):
     path = get_cache_path(year, filename)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
-
 
 def safe_extract(zip_path: str, extract_dir: str) -> list[str]:
     extracted = []
@@ -60,12 +56,10 @@ def safe_extract(zip_path: str, extract_dir: str) -> list[str]:
                 pass
     return extracted
 
-
 def encode_image(img: Image.Image) -> str:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode()
-
 
 import requests
 
@@ -257,7 +251,8 @@ def process_zip(zip_path: str, year: str):
             
             pdf_paths_only = [p[0] for p in to_process]
             producer = Thread(target=pdf_producer, args=(pdf_paths_only, buffer), daemon=True)
-            consumers = [Thread(target=ocr_consumer, args=(buffer, results, year), daemon=True) for _ in range(len(OLLAMA_URLS))]
+            
+            consumers = [Thread(target=ocr_consumer, args=(buffer, results, year), daemon=True) for _ in range(NUM_WORKERS)]
 
             producer.start()
             for c in consumers: c.start()

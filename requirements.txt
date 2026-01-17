@@ -1,0 +1,6 @@
+pdf2image
+Pillow
+typhoon-ocr
+requests
+tenacity
+tqdm

@@ -1,6 +1,12 @@
 #!/bin/bash
 set -e
 
+SERVICE=$1
+YEAR=$2
+shift 2
+MONTHS=$@   # ratchakitcha
+
+
 # install Hugging Face CLI
 curl -LsSf https://hf.co/cli/install.sh | bash
 
@@ -8,23 +14,37 @@ export PATH="$HOME/.local/bin:$PATH"
 
 hf --help
 
-
 REPO="Kitipong/thai-gov-dataset"
-SRC="ratchakitcha/_cache/2025"
-DEST="json/ratchakitcha/2025"
+CACHE_ROOT="ocr/cache"
+JSON_ROOT="ocr/json"
+DEST_BASE="json/$SERVICE/$YEAR"
 
-for day in $(seq -w 01 31); do
-    PATTERN="2025-01-$day"
+if [ "$SERVICE" = "ratchakitcha" ]; then
+    MODE="monthly"
+else
+    MODE="yearly"
+fi
 
-    if ls $SRC/$PATTERN*.json >/dev/null 2>&1; then
-        echo "Processing: $PATTERN"
+echo "SERVICE=$SERVICE YEAR=$YEAR MODE=$MODE"
 
-        hf upload $REPO $SRC $DEST \
-            --repo-type=dataset \
-            --include="$PATTERN*.json"
+python zip-generate.py "$SERVICE" "$YEAR" "$MODE"
 
-        echo "Finished: $PATTERN"
-    else
-        echo "Skipping: $PATTERN (No files)"
-    fi
+python zip-manifest.py "$JSON_ROOT/$SERVICE/$YEAR"
+
+curl -LsSf https://hf.co/cli/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
+
+hf --help
+
+for f in "$JSON_ROOT/$SERVICE/$YEAR"/*.zip; do
+    name=$(basename "$f")
+    hf upload "$REPO" "$f" "$DEST_BASE/$name" --repo-type=dataset
 done
+
+hf upload \
+    "$REPO" \
+    "$JSON_ROOT/$SERVICE/$YEAR/manifest.json" \
+    "$DEST_BASE/manifest.json" \
+    --repo-type=dataset
+
+echo "DONE ✔"

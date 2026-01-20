@@ -11,6 +11,7 @@ from threading import Thread, Condition, Lock
 from collections import deque, defaultdict
 from pdf2image import convert_from_path, pdfinfo_from_path
 from PIL import Image
+import gc
 
 ZIP_ROOT = os.getenv("ZIP_ROOT", "zip")
 OCR_ROOT = os.getenv("OCR_ROOT", "ocr")
@@ -22,7 +23,7 @@ OLLAMA_MODEL = "scb10x/typhoon-ocr1.5-3b"
 
 MAX_PAGES_PER_DOC = 100
 BATCH_SIZE = 1
-BUFFER_MAX_PAGES = 1000
+BUFFER_MAX_PAGES = 10
 NUM_WORKERS = 3
 
 ollama_pool = cycle(OLLAMA_URLS)
@@ -84,6 +85,13 @@ def save_cache(year: str, filename: str, data: dict) -> bool:
     except Exception as e:
         print(f" [SAVE ERR] {filename}: {e}")
         return False
+    
+def save_page_checkpoint(year, filename, page_idx, text):
+    checkpoint_dir = os.path.join(OCR_ROOT, SERVICE, "_checkpoints", year, filename)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    path = os.path.join(checkpoint_dir, f"{page_idx}.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
 
 def safe_extract(zip_path: str, extract_dir: str) -> list[str]:
     extracted = []
@@ -128,7 +136,7 @@ def ocr_batch(images: list[Image.Image]) -> list[str]:
 def pdf_producer(pdf_paths_with_pages: list, buffer: PageBuffer):
     for pdf_path, total_pages in pdf_paths_with_pages:
         name = os.path.basename(pdf_path)
-        print(f" [OCR START] {name} ({total_pages} pages)")
+        # print(f" [OCR START] {name} ({total_pages} pages)")
         try:
             images = convert_from_path(pdf_path, dpi=150, thread_count=4)
             ready_images = []
@@ -144,29 +152,40 @@ def pdf_producer(pdf_paths_with_pages: list, buffer: PageBuffer):
 def ocr_consumer(buffer: PageBuffer, results: dict, year: str):
     while True:
         item = buffer.get()
-        pdf, batch_idx, total_pages = item["pdf"], item["batch_index"], item["total_pages"]
-        if pdf not in pdf_start_times: pdf_start_times[pdf] = time.perf_counter()
+        pdf = item["pdf"]
+        batch_idx = item["batch_index"]
+        total_pages = item["total_pages"]
+
         try:
             texts = ocr_batch(item["images"])
-            if texts is None:
-                buffer.task_done()
-                continue
-            with write_lock:
-                if pdf not in results: results[pdf] = {"pages": total_pages, "texts": defaultdict(str)}
-                base = batch_idx * BATCH_SIZE
-                for i, text in enumerate(texts): results[pdf]["texts"][base + i] = text
-                if len(results[pdf]["texts"]) == total_pages:
-                    dur = round(time.perf_counter() - pdf_start_times.get(pdf, time.perf_counter()), 2)
-                    ordered = [results[pdf]["texts"].get(i, "") for i in range(total_pages)]
-                    data = {"filename": pdf, "pages": total_pages, "text": "\n".join(ordered).strip(), "time_sec": dur, "cached": False}
-                    if save_cache(year, pdf, data):
-                        results[pdf] = data 
-                        print(f" [CACHE SAVED] {pdf} ({dur}s)")
-                    else: results.pop(pdf, None)
-                    pdf_start_times.pop(pdf, None)
-            print(f" [DONE] {pdf} | Batch {batch_idx+1}")
-        except Exception as e: print(f" [CONSUMER ERR] {pdf}: {e}")
-        finally: buffer.task_done()
+            if texts and texts[0]:
+                text_result = texts[0]
+
+                save_page_checkpoint(year, pdf, batch_idx, text_result)
+                
+                with write_lock:
+                    if pdf not in results:
+                        results[pdf] = {"pages": total_pages, "texts": {}}
+                    
+                    results[pdf]["texts"][batch_idx] = text_result
+
+                    if len(results[pdf]["texts"]) == total_pages:
+                        ordered_text = [results[pdf]["texts"][i] for i in range(total_pages)]
+                        full_data = {
+                            "filename": pdf,
+                            "pages": total_pages,
+                            "text": "\n\n".join(ordered_text).strip(),
+                            "time_sec": round(time.perf_counter() - pdf_start_times.get(pdf, time.perf_counter()), 2)
+                        }
+                        if save_cache(year, pdf, full_data):
+                            print(f" [DONE & SAVED] {pdf}")
+            item["images"] = None
+            gc.collect()
+
+        except Exception as e:
+            print(f" [CONSUMER ERR] {pdf}: {e}")
+        finally:
+            buffer.task_done()
 
 def process_zip(zip_path: str, year: str):
     month = os.path.splitext(os.path.basename(zip_path))[0]

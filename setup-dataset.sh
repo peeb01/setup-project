@@ -31,16 +31,16 @@ if [ "$dataset" = "ratchakitcha" ]; then
 elif [ "$dataset" = "admincourt" ]; then
     echo "[DL] admincourt"
 
-    hf download Kitipong/thai-gov-dataset --repo-type dataset --include "zip/admincourt/*" --local-dir .
+    hf download Kitipong/thai-gov-dataset --repo-type dataset --include "admincourt/*" --local-dir .
     
     mkdir -p zip/admincourt
     mv admincourt/*.zip zip/admincourt/
-    [ -f admincourt/manifest.json ] && mv admincourt/manifest.json zip/admincourt/
+    [ -f admincourt/manifest.json ] && mv admincourt/manifest.json admincourt/
 
 elif [ "$dataset" = "deka" ]; then
     echo "[DL] deka"
 
-    hf download Kitipong/thai-gov-dataset --repo-type dataset --include "zip/deka/*" --local-dir .
+    hf download Kitipong/thai-gov-dataset --repo-type dataset --include "deka/*" --local-dir .
     mkdir -p zip/deka
     mv deka/*.zip zip/deka/
     [ -f deka/manifest.json ] && mv deka/manifest.json zip/deka/

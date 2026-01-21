@@ -15,11 +15,12 @@ from pathlib import Path
 from pdf2image import convert_from_path, pdfinfo_from_path
 from PIL import Image
 
+
 ZIP_ROOT = Path(os.getenv("ZIP_ROOT", "zip"))
 OCR_ROOT = Path(os.getenv("OCR_ROOT", "ocr"))
 
-SERVICE = os.getenv("SERVICE", "ratchakitcha")   # ratchakitcha | admincourt | deka
-TARGET_YEAR = os.getenv("TARGET_YEAR")           # optional
+SERVICE = os.getenv("SERVICE", "ratchakitcha")
+TARGET_YEAR = os.getenv("TARGET_YEAR")
 
 MAX_PAGES = 100
 IMAGE_DPI = 200
@@ -27,9 +28,10 @@ IMAGE_DPI = 200
 OLLAMA_URLS = ["http://localhost:11434"]
 OLLAMA_MODEL = "scb10x/typhoon-ocr1.5-3b"
 
-REQUEST_DELAY_SEC = float(os.getenv("REQUEST_DELAY_SEC", "1.0"))
+BATCH_SIZE = 4
 
 ollama_pool = cycle(OLLAMA_URLS)
+
 
 def buddhist_to_ad(year: str) -> str:
     y = int(year)
@@ -94,51 +96,54 @@ def save_cache(service, year, pdf_name, data):
         encoding="utf-8"
     )
 
-def ocr_single_image(img: Image.Image) -> str:
+def ocr_images_batch(images: list[Image.Image]) -> list[str]:
     base_url = next(ollama_pool)
     api_url = f"{base_url}/api/generate"
 
     system_instruction = (
-        "Extract all text from the image and format as Markdown.\n"
-        "- Tables: Render in clean HTML <table>.\n"
-        "- Checkboxes: Use ☐ or ☑.\n"
-        "- Output: Return only the extracted content, no explanations."
+        "You are an OCR engine.\n"
+        "Extract text from EACH image.\n"
+        "Separate pages with:\n"
+        "===PAGE===\n"
+        "- Preserve layout\n"
+        "- Tables as HTML <table>\n"
+        "- Checkboxes ☐ ☑\n"
+        "- Output ONLY OCR text"
     )
 
-    if max(img.size) > 1600:
-        img.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
+    encoded_images = []
 
-    if img.mode != "RGB":
-        img = img.convert("RGB")
+    for img in images:
+        if max(img.size) > 1600:
+            img.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
 
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=85)
-    encoded = base64.b64encode(buf.getvalue()).decode()
-    buf.close()
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=75)
+        encoded_images.append(base64.b64encode(buf.getvalue()).decode())
+        buf.close()
 
     payload = {
         "model": OLLAMA_MODEL,
         "prompt": f"<image>\n{system_instruction}\n\nContent:",
-        "images": [encoded],
+        "images": encoded_images,
         "stream": False,
         "options": {
             "temperature": 0,
-            "num_predict": 3072, 
-            "repeat_penalty": 1.2,
+            "num_predict": 1536,
+            "repeat_penalty": 1.1,
         }
     }
 
-    try:
-        r = requests.post(api_url, json=payload, timeout=600)
-        r.raise_for_status()
-        return r.json().get("response", "").strip()
-    except Exception as e:
-        print(f" [ERR] Ollama Error: {e}")
-        return ""
-    finally:
-        del img
-        gc.collect()
-        time.sleep(REQUEST_DELAY_SEC)  
+    r = requests.post(api_url, json=payload, timeout=600)
+    r.raise_for_status()
+
+    raw = r.json().get("response", "")
+    pages = [p.strip() for p in raw.split("===PAGE===")]
+    return pages
+
 
 def process_pdf_from_zip(
     zipf: zipfile.ZipFile,
@@ -174,45 +179,62 @@ def process_pdf_from_zip(
 
         print(f"[OCR] {pdf_name} ({total_pages} pages)")
         texts = []
-        start = time.perf_counter()
 
-        for page in range(1, total_pages + 1):
-            print(f"\t- page {page}/{total_pages}")
+        pdf_start = time.perf_counter()
+
+        for batch_start in range(1, total_pages + 1, BATCH_SIZE):
+            batch_end = min(batch_start + BATCH_SIZE - 1, total_pages)
+
+            print(f"\t- page {batch_start}-{batch_end}/{total_pages}")
+
+            batch_t0 = time.perf_counter()
+
             try:
                 images = convert_from_path(
                     str(tmp_pdf),
                     dpi=IMAGE_DPI,
-                    first_page=page,
-                    last_page=page,
+                    first_page=batch_start,
+                    last_page=batch_end,
                     thread_count=1
                 )
 
-                if images:
-                    text = ocr_single_image(images[0])
-                    texts.append(text)
-                    images[0].close()
-                del images
-                gc.collect()
+                pages_text = ocr_images_batch(images)
+                texts.extend(pages_text)
 
             except Exception as e:
-                print(f"\t [ERR] page {page}: {e}")
+                print(f"\t [ERR] pages {batch_start}-{batch_end}: {e}")
                 break
 
-        duration = round(time.perf_counter() - start, 2)
+            finally:
+                for img in images:
+                    img.close()
+                del images
+
+            batch_dt = time.perf_counter() - batch_t0
+            per_page = batch_dt / (batch_end - batch_start + 1)
+
+            print(
+                f"\t  ⏱ batch {batch_start}-{batch_end} "
+                f"{batch_dt:.2f}s ({per_page:.2f}s/page)"
+            )
+
+        total_dt = time.perf_counter() - pdf_start
 
         save_cache(service, year, pdf_name, {
             "filename": pdf_name,
             "pages": total_pages,
             "text": "\n\n".join(texts).strip(),
-            "time_sec": duration
+            "time_sec": round(total_dt, 2)
         })
 
         add_manifest(manifest, zip_key, pdf_name)
 
+        gc.collect()
+
 
 def process_zip(zip_path: Path, service: str):
     raw_year = zip_path.stem
-    year = buddhist_to_ad(raw_year) if service == "ratchakitcha" else raw_year
+    year = raw_year # buddhist_to_ad(raw_year) if service == "ratchakitcha" else raw_year
     zip_key = zip_path.name
 
     manifest = load_manifest(service, year)
@@ -225,6 +247,7 @@ def process_zip(zip_path: Path, service: str):
                 process_pdf_from_zip(z, info, service, year, zip_key, manifest)
 
     save_manifest(service, year, manifest)
+
 
 def main():
     service_dir = ZIP_ROOT / SERVICE

@@ -12,6 +12,8 @@ from itertools import cycle
 from datetime import datetime
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from threading import Thread
+from queue import Queue
 
 from pdf2image import convert_from_path, pdfinfo_from_path
 from PIL import Image
@@ -44,24 +46,26 @@ def manifest_path(service: str, year: str) -> Path:
 def load_manifest(service: str, year: str) -> dict:
     p = manifest_path(service, year)
     if p.exists():
-        try: return json.loads(p.read_text(encoding="utf-8"))
-        except: pass
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except:
+            pass
     return {"schema_version": 1, "generated_at": None, "zips": {}}
 
 def save_manifest(service: str, year: str, manifest: dict):
     manifest["generated_at"] = datetime.utcnow().isoformat() + "Z"
     manifest_path(service, year).write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8"
     )
 
 def ocr_worker(img_idx_tuple):
     img, idx, total = img_idx_tuple
     base_url = next(ollama_pool)
     api_url = f"{base_url}/api/generate"
-    
+
     t0 = time.perf_counter()
-    
-    # Pre-process
+
     if max(img.size) > 1500:
         img.thumbnail((1500, 1500), Image.Resampling.LANCZOS)
     if img.mode != "RGB":
@@ -97,13 +101,46 @@ def ocr_worker(img_idx_tuple):
         print(f"\t [ERR] Page {idx+1}: {e}")
         return f"[Error: {e}]"
 
+def pdf_to_image_producer(pdf_path: Path, total_pages: int, q: Queue):
+    for i in range(1, total_pages + 1):
+        try:
+            imgs = convert_from_path(
+                str(pdf_path),
+                dpi=IMAGE_DPI,
+                first_page=i,
+                last_page=i,
+            )
+            q.put((imgs[0], i - 1, total_pages))
+        except Exception as e:
+            print(f"\t [ERR] page {i}: {e}")
+            q.put((None, i - 1, total_pages))
+    q.put(None)
+
+def ocr_consumer(q: Queue, results: dict):
+    while True:
+        item = q.get()
+        if item is None:
+            q.put(None)
+            break
+
+        img, idx, total = item
+        if img is None:
+            results[idx] = "[Error: image conversion failed]"
+            continue
+
+        results[idx] = ocr_worker((img, idx, total))
+        img.close()
+        q.task_done()
+
 def process_pdf_from_zip(zipf, info, service, year, zip_key, manifest):
     pdf_name = Path(info.filename).name
-    
+
     if zip_key in manifest["zips"] and pdf_name in manifest["zips"][zip_key]["files"]:
         return
+
     c_path = cache_path(service, year, pdf_name)
-    if c_path.exists(): return
+    if c_path.exists():
+        return
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_pdf = Path(tmp) / pdf_name
@@ -112,27 +149,41 @@ def process_pdf_from_zip(zipf, info, service, year, zip_key, manifest):
 
         try:
             total_pages = int(pdfinfo_from_path(str(tmp_pdf))["Pages"])
-        except: return
+        except:
+            return
 
-        if total_pages > MAX_PAGES: return
+        if total_pages > MAX_PAGES:
+            return
 
         print(f"[OCR] {pdf_name} ({total_pages} pages)")
         pdf_start = time.perf_counter()
-        
-        images = convert_from_path(str(tmp_pdf), dpi=IMAGE_DPI)
-        
-        worker_inputs = [(img, i, total_pages) for i, img in enumerate(images)]
-        
-        with ThreadPoolExecutor(max_workers=len(OLLAMA_URLS)) as executor:
-            texts = list(executor.map(ocr_worker, worker_inputs))
 
-        for img in images: img.close()
-        
+        q = Queue(maxsize=len(OLLAMA_URLS) * 2)
+        results = {}
+
+        producer = Thread(
+            target=pdf_to_image_producer,
+            args=(tmp_pdf, total_pages, q),
+            daemon=True
+        )
+        producer.start()
+
+        consumers = []
+        for _ in range(len(OLLAMA_URLS)):
+            t = Thread(target=ocr_consumer, args=(q, results), daemon=True)
+            t.start()
+            consumers.append(t)
+
+        producer.join()
+        for t in consumers:
+            t.join()
+
+        texts = [results[i] for i in range(total_pages)]
+
         total_dt = time.perf_counter() - pdf_start
         avg_p = total_dt / total_pages
         print(f"  Finished {pdf_name} | Total: {total_dt:.2f}s | Avg: {avg_p:.2f}s/page")
 
-        # Save Result
         c_path.write_text(json.dumps({
             "filename": pdf_name,
             "pages": total_pages,
@@ -140,12 +191,11 @@ def process_pdf_from_zip(zipf, info, service, year, zip_key, manifest):
             "time_sec": round(total_dt, 2)
         }, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        # Update Manifest
         z = manifest["zips"].setdefault(zip_key, {"count": 0, "files": []})
         if pdf_name not in z["files"]:
             z["files"].append(pdf_name)
             z["count"] = len(z["files"])
-        
+
         gc.collect()
 
 def process_zip(zip_path: Path, service: str):
@@ -159,7 +209,8 @@ def process_zip(zip_path: Path, service: str):
 
 def main():
     service_dir = ZIP_ROOT / SERVICE
-    if not service_dir.exists(): return
+    if not service_dir.exists():
+        return
 
     for z in sorted(service_dir.rglob("*.zip")):
         if TARGET_YEAR and TARGET_YEAR not in str(z):

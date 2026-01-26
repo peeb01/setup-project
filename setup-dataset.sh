@@ -31,7 +31,7 @@ if [ "$dataset" = "ratchakitcha" ]; then
 elif [ "$dataset" = "admincourt" ]; then
     echo "[DL] admincourt"
 
-    hf download Kitipong/thai-gov-dataset --repo-type dataset --include "admincourt/*" --local-dir .
+    hf download aiastra-ai/aiastra-dataset-thaigov --repo-type dataset --include "admincourt/*" --local-dir .
     
     mkdir -p zip/admincourt
     mv admincourt/*.zip zip/admincourt/
@@ -40,7 +40,7 @@ elif [ "$dataset" = "admincourt" ]; then
 elif [ "$dataset" = "deka" ]; then
     echo "[DL] deka"
 
-    hf download Kitipong/thai-gov-dataset --repo-type dataset --include "deka/*" --local-dir .
+    hf download aiastra-ai/aiastra-dataset-thaigov --repo-type dataset --include "deka/*" --local-dir .
     mkdir -p zip/deka
     mv deka/*.zip zip/deka/
     [ -f deka/manifest.json ] && mv deka/manifest.json zip/deka/
@@ -51,6 +51,6 @@ else
 fi
 
 
-hf download Kitipong/thai-gov-dataset --repo-type dataset --include "json/*" --local-dir ./ocr
+hf download aiastra-ai/aiastra-dataset-thaigov --repo-type dataset --include "json/*" --local-dir ./ocr
 
 echo "Done canonical zip layout ready"

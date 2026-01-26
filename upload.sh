@@ -14,7 +14,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 hf --help
 
-REPO="Kitipong/thai-gov-dataset"
+REPO="aiastra-ai/aiastra-dataset-thaigov"
 CACHE_ROOT="ocr/cache"
 JSON_ROOT="ocr/json"
 DEST_BASE="json/$SERVICE/$YEAR"

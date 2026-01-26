@@ -22,7 +22,7 @@ OCR_ROOT = Path(os.getenv("OCR_ROOT", "ocr"))
 SERVICE = os.getenv("SERVICE", "admincourt")
 TARGET_YEAR = os.getenv("TARGET_YEAR")
 
-MAX_PAGES = 500
+MAX_PAGES = 250
 IMAGE_DPI = 200
 
 OLLAMA_URLS = ["http://localhost:11434", "http://localhost:11435"]
